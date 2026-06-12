@@ -1,3 +1,25 @@
+name: Append Rainfall Row To CSV
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  fetch_and_append:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Checkout full repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          ref: main
+
+      - name: Install dependencies
+        run: pip install requests lxml
+
       - name: Parse XML & append new row to CSV
         run: |
           python3 << 'EOF'
@@ -27,7 +49,7 @@
                   f.write("0")
               exit()
 
-          # 解析XML，增加空值保护
+          # 解析XML，增加空值保护，修复None.strip()报错
           tree = etree.fromstring(xml_content.encode("utf-8"))
           obs_time_raw = tree.findtext(".//ObsTime")
           obs_time = obs_time_raw.strip() if obs_time_raw is not None else ""
@@ -46,7 +68,7 @@
                       break
               station_rain[st_name] = rain4
 
-          # 固定表头（和你截图列顺序完全一致）
+          # 固定表头，和你的Excel截图列顺序、列名1:1匹配
           header = [
               "日期時間",
               "路環市區(毫米)",
@@ -61,7 +83,7 @@
               "澳門污水處理廠(毫米)"
           ]
 
-          # 构造新一行数据
+          # 按固定站点顺序组装单行数据
           new_row = [obs_time]
           col_station_list = [
               "路環市區",
@@ -78,7 +100,7 @@
           for s in col_station_list:
               new_row.append(station_rain.get(s, "0.0"))
 
-          # CSV写入逻辑：不存在就新建表头；存在就末尾追加一行
+          # 追加写入CSV：首次新建表头，后续只新增一行
           file_exists = os.path.exists(CSV_FILE)
           with open(CSV_FILE, "a", encoding="utf-8", newline="") as f:
               writer = csv.writer(f)
@@ -86,9 +108,26 @@
                   writer.writerow(header)
               writer.writerow(new_row)
 
-          # 更新哈希标记已更新
+          # 更新哈希与更新标记
           with open(HASH_FILE, "w", encoding="utf-8") as f:
               f.write(new_hash)
           with open("update_flag", "w") as f:
               f.write("1")
           EOF
+
+      - name: Git commit & push new line
+        run: |
+          FLAG=$(cat update_flag)
+          if [ "$FLAG" != "1" ]; then
+            echo "XML未更新，无需追加数据"
+            exit 0
+          fi
+
+          git config --global user.name "macaosso"
+          git config --global user.email "macaosso@users.noreply.github.com"
+
+          git add rainfall_history.csv last_xml_hash.txt
+          if git status --porcelain | grep -q .; then
+            git commit -m "新增观测雨量行 $(date '+%Y-%m-%d %H:%M')"
+            git push origin main
+          fi
