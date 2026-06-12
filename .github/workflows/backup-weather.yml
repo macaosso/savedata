@@ -1,83 +1,130 @@
-name: Auto Backup English Weather XML
+name: Append Rainfall Row To CSV
 on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
-  fetch_and_backup:
+  fetch_and_append:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout full repo + 绑定推送上游分支
+      - name: Checkout full repo
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
           persist-credentials: true
           ref: main
 
-      - name: Install requests
-        run: pip install requests
+      - name: Install dependencies
+        run: pip install requests lxml
 
-      - name: Run Python fetch logic
+      - name: Parse XML & append new row to CSV
         run: |
           python3 << 'EOF'
           import requests
           import hashlib
           import os
-          from datetime import datetime
+          import csv
+          from lxml import etree
 
           URL = "https://xml.smg.gov.mo/p_actualweather.xml"
-          ARCHIVE_FOLDER = "./xml_archive_en"
+          CSV_FILE = "./rainfall_history.csv"
           HASH_FILE = "./last_xml_hash.txt"
-          os.makedirs(ARCHIVE_FOLDER, exist_ok=True)
 
-          def get_md5(content):
-              return hashlib.md5(content.encode("utf-8")).hexdigest()
+          # 拉取原始XML
+          resp = requests.get(URL, timeout=30)
+          resp.raise_for_status()
+          xml_content = resp.text
+          new_hash = hashlib.md5(xml_content.encode("utf-8")).hexdigest()
 
-          res = requests.get(URL, timeout=30)
-          res.raise_for_status()
-          xml_text = res.text
-          new_hash = get_md5(xml_text)
-
+          # 哈希比对，无更新直接退出
           old_hash = ""
           if os.path.exists(HASH_FILE):
               with open(HASH_FILE, "r", encoding="utf-8") as f:
                   old_hash = f.read().strip()
+          if new_hash == old_hash:
+              with open("update_flag", "w") as f:
+                  f.write("0")
+              exit()
 
-          update_flag = "0"
-          if new_hash != old_hash:
-              ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-              fn = f"p_actualweather_{ts}.xml"
-              save_path = os.path.join(ARCHIVE_FOLDER, fn)
-              with open(save_path, "w", encoding="utf-8") as f:
-                  f.write(xml_text)
-              with open(HASH_FILE, "w", encoding="utf-8") as f:
-                  f.write(new_hash)
-              update_flag = "1"
+          # 解析XML
+          tree = etree.fromstring(xml_content.encode("utf-8"))
+          obs_time = tree.findtext(".//ObsTime").strip()
 
+          # 站点-雨量字典，只提取Type=4雨量
+          station_rain = {}
+          for station in tree.xpath(".//Station"):
+              st_name = station.findtext("StationName", default="").strip()
+              rain4 = "0.0"
+              for data_node in station.xpath("Data"):
+                  t = data_node.findtext("Type")
+                  if t == "4":
+                      rain4 = data_node.findtext("dValue", default="0.0")
+                      break
+              station_rain[st_name] = rain4
+
+          # 固定表头（和你截图列顺序完全一致）
+          header = [
+              "日期時間",
+              "路環市區(毫米)",
+              "大炮台山(毫米)",
+              "紀念孫中山市政公園(毫米)",
+              "澳門大學(毫米)",
+              "海事博物館(毫米)",
+              "外港碼頭(毫米)",
+              "九澳(毫米)",
+              "東亞運站(毫米)",
+              "大潭山(毫米)",
+              "澳門污水處理廠(毫米)"
+          ]
+
+          # 构造新一行数据
+          new_row = [obs_time]
+          col_station_list = [
+              "路環市區",
+              "大炮台山",
+              "紀念孫中山市政公園",
+              "澳門大學",
+              "海事博物館",
+              "外港碼頭",
+              "九澳",
+              "東亞運站",
+              "大潭山",
+              "澳門污水處理廠"
+          ]
+          for s in col_station_list:
+              new_row.append(station_rain.get(s, "0.0"))
+
+          # CSV写入逻辑：不存在就新建表头；存在就末尾追加一行
+          file_exists = os.path.exists(CSV_FILE)
+          with open(CSV_FILE, "a", encoding="utf-8", newline="") as f:
+              writer = csv.writer(f)
+              if not file_exists:
+                  writer.writerow(header)
+              writer.writerow(new_row)
+
+          # 更新哈希标记已更新
+          with open(HASH_FILE, "w", encoding="utf-8") as f:
+              f.write(new_hash)
           with open("update_flag", "w") as f:
-              f.write(update_flag)
+              f.write("1")
           EOF
 
-      - name: Git commit & push (严格防128报错)
+      - name: Git commit & push new line
         run: |
           FLAG=$(cat update_flag)
           if [ "$FLAG" != "1" ]; then
-            echo "No XML changes, exit successfully"
+            echo "XML未更新，无需追加数据"
             exit 0
           fi
 
-          # 固定提交者信息
           git config --global user.name "macaosso"
           git config --global user.email "macaosso@users.noreply.github.com"
 
-          git add xml_archive_en/ last_xml_hash.txt
-          # 检测是否有真实变更，无变更直接退出
+          git add rainfall_history.csv last_xml_hash.txt
           if git status --porcelain | grep -q .; then
-            git commit -m "Auto update weather XML $(date '+%Y-%m-%d %H:%M')"
+            git commit -m "新增观测雨量行 $(date '+%Y-%m-%d %H:%M')"
             git push origin main
-          else
-            echo "No actual file changes, skip commit"
           fi
