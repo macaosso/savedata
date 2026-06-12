@@ -1,0 +1,67 @@
+name: Auto Backup English Weather XML
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Check every 10 minutes
+  workflow_dispatch: # Allow manual run
+
+jobs:
+  fetch_and_backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        run: python -m pip install requests
+
+      - name: Fetch XML & detect changes
+        run: |
+          import requests
+          import hashlib
+          import os
+          from datetime import datetime
+
+          # Target English XML URL
+          URL = "https://xml.smg.gov.mo/p_actualweather.xml"
+          ARCHIVE_FOLDER = "./xml_archive_en"
+          HASH_FILE = "./last_xml_hash.txt"
+          os.makedirs(ARCHIVE_FOLDER, exist_ok=True)
+
+          def get_md5(content):
+              return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+          # Get remote data
+          res = requests.get(URL, timeout=15)
+          res.raise_for_status()
+          xml_text = res.text
+          new_hash = get_md5(xml_text)
+
+          # Read old hash
+          old_hash = ""
+          if os.path.exists(HASH_FILE):
+              with open(HASH_FILE, "r", encoding="utf-8") as f:
+                  old_hash = f.read().strip()
+
+          # Save only if changed
+          if new_hash != old_hash:
+              time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+              file_name = f"p_actualweather_{time_stamp}.xml"
+              save_path = os.path.join(ARCHIVE_FOLDER, file_name)
+
+              with open(save_path, "w", encoding="utf-8") as f:
+                  f.write(xml_text)
+              with open(HASH_FILE, "w", encoding="utf-8") as f:
+                  f.write(new_hash)
+              open("update_flag", "w").write("1")
+          else:
+              open("update_flag", "w").write("0")
+
+      - name: Commit & push new files
+        run: |
+          if [ "$(cat update_flag)" = "1" ]; then
+            git config --global user.name "Auto Backup Bot"
+            git config --global user.email "bot@github.com"
+            git add .
+            git commit -m "Update English weather XML $(date '+%Y-%m-%d %H:%M')"
+            git push
+          fi
