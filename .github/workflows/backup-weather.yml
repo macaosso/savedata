@@ -7,9 +7,14 @@ on:
 jobs:
   fetch_and_backup:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout repository
+      - name: Checkout full repository history (fix push 128 error)
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0       # 关键：完整拉取分支历史，解决push 128
+          persist-credentials: true
 
       - name: Install Python dependencies
         run: pip install requests
@@ -30,7 +35,7 @@ jobs:
           def get_md5(content):
               return hashlib.md5(content.encode("utf-8")).hexdigest()
 
-          res = requests.get(URL, timeout=15)
+          res = requests.get(URL, timeout=30)
           res.raise_for_status()
           xml_text = res.text
           new_hash = get_md5(xml_text)
@@ -54,12 +59,20 @@ jobs:
               open("update_flag", "w").write("0")
           EOF
 
-      - name: Commit & push new files
+      - name: Commit & push only when new data exists
         run: |
-          if [ "$(cat update_flag)" = "1" ]; then
-            git config --global user.name "Auto Backup Bot"
-            git config --global user.email "bot@github.com"
-            git add .
-            git commit -m "Update English weather XML $(date '+%Y-%m-%d %H:%M')"
-            git push
+          FLAG=$(cat update_flag)
+          if [ "$FLAG" = "1" ]; then
+            git config --global user.name "macaosso"
+            git config --global user.email "macaosso@users.noreply.github.com"
+            git add xml_archive_en/ last_xml_hash.txt
+            # 检查是否有变更，无变更直接退出，避免空提交128
+            if git diff --cached --quiet; then
+              echo "No changes to commit, skip push"
+              exit 0
+            fi
+            git commit -m "Auto update weather XML $(date '+%Y-%m-%d %H:%M')"
+            git push origin HEAD:main
+          else
+            echo "XML content unchanged, skip commit & push"
           fi
