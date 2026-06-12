@@ -10,18 +10,19 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout full repository history (fix push 128 error)
+      - name: Checkout full repo + 绑定推送上游分支
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0       # 关键：完整拉取分支历史，解决push 128
+          fetch-depth: 0
           persist-credentials: true
+          ref: main
 
-      - name: Install Python dependencies
+      - name: Install requests
         run: pip install requests
 
-      - name: Run Python fetch script
+      - name: Run Python fetch logic
         run: |
-          python3 << EOF
+          python3 << 'EOF'
           import requests
           import hashlib
           import os
@@ -45,34 +46,38 @@ jobs:
               with open(HASH_FILE, "r", encoding="utf-8") as f:
                   old_hash = f.read().strip()
 
+          update_flag = "0"
           if new_hash != old_hash:
-              time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-              file_name = f"p_actualweather_{time_stamp}.xml"
-              save_path = os.path.join(ARCHIVE_FOLDER, file_name)
-
+              ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+              fn = f"p_actualweather_{ts}.xml"
+              save_path = os.path.join(ARCHIVE_FOLDER, fn)
               with open(save_path, "w", encoding="utf-8") as f:
                   f.write(xml_text)
               with open(HASH_FILE, "w", encoding="utf-8") as f:
                   f.write(new_hash)
-              open("update_flag", "w").write("1")
-          else:
-              open("update_flag", "w").write("0")
+              update_flag = "1"
+
+          with open("update_flag", "w") as f:
+              f.write(update_flag)
           EOF
 
-      - name: Commit & push only when new data exists
+      - name: Git commit & push (严格防128报错)
         run: |
           FLAG=$(cat update_flag)
-          if [ "$FLAG" = "1" ]; then
-            git config --global user.name "macaosso"
-            git config --global user.email "macaosso@users.noreply.github.com"
-            git add xml_archive_en/ last_xml_hash.txt
-            # 检查是否有变更，无变更直接退出，避免空提交128
-            if git diff --cached --quiet; then
-              echo "No changes to commit, skip push"
-              exit 0
-            fi
+          if [ "$FLAG" != "1" ]; then
+            echo "No XML changes, exit successfully"
+            exit 0
+          fi
+
+          # 固定提交者信息
+          git config --global user.name "macaosso"
+          git config --global user.email "macaosso@users.noreply.github.com"
+
+          git add xml_archive_en/ last_xml_hash.txt
+          # 检测是否有真实变更，无变更直接退出
+          if git status --porcelain | grep -q .; then
             git commit -m "Auto update weather XML $(date '+%Y-%m-%d %H:%M')"
-            git push origin HEAD:main
+            git push origin main
           else
-            echo "XML content unchanged, skip commit & push"
+            echo "No actual file changes, skip commit"
           fi
